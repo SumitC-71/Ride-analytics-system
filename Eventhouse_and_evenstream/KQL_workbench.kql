@@ -1,0 +1,176 @@
+// ============================================================
+// RideX — KQL Queries & Materialized Views (Real-Time Dashboard)
+// Target table: trips_stream (Eventstream -> Eventhouse)
+//
+// DESIGN NOTE (fix from earlier version):
+// Materialized views only support ONE summarize in the body, and
+// any ago()/time filter inside an MV body is evaluated once at
+// ingestion time — it does NOT re-evaluate as wall-clock time
+// moves forward. So a "last 1h" filter baked into an MV silently
+// turns into "forever" as rows accumulate.
+//
+// Fix: ONE materialized view does the dedup (arg_max by trip_id,
+// no time filter). All time-windowing (ago(...)) happens at
+// QUERY time via functions, so every dashboard refresh recomputes
+// the window fresh against current wall-clock time.
+//
+// EXTERNAL TABLES NEEDED (Lakehouse shortcuts into this KQL DB):
+//   - driver  (expects columns: driver_id, name)
+//   - rider   (expects columns: rider_id, name)
+// These are used to resolve names for chart labels. If your
+// bronze shortcut uses different column names, adjust the
+// `join ... on` / `project` clauses below accordingly.
+// ============================================================
+
+
+// ------------------------------------------------------------
+// 0. BASE — single source of truth: latest state per trip
+// Everything else queries this. No time filter here on purpose.
+// ------------------------------------------------------------
+
+// Optional — only for resetting test/demo data, run manually when needed:
+// .clear table trips_stream data
+
+.create-or-alter materialized-view mv_latest_trip_state on table trips_stream
+{
+    trips_stream
+    | summarize arg_max(event_sent_at, *) by trip_id
+}
+
+
+// ------------------------------------------------------------
+// 1. FRAUD — Cancellations per driver, last 1 hour (sliding)
+// ------------------------------------------------------------
+.create-or-alter function fn_driver_cancellations_1h() {
+    mv_latest_trip_state
+    | where requested_at > ago(1h)
+    | where status == "cancelled" and isnotempty(driver_id)
+    | summarize CancelCount = count() by driver_id
+}
+
+fn_driver_cancellations_1h()
+| where CancelCount > 2
+| order by CancelCount desc
+| join external_table('driver') on driver_id
+| project name, CancelCount
+| render barchart
+
+
+// ------------------------------------------------------------
+// 2. FRAUD — Cancellations per rider, last 1 hour (sliding)
+// ------------------------------------------------------------
+.create-or-alter function fn_rider_cancellations_1h() {
+    mv_latest_trip_state
+    | where requested_at > ago(1h)
+    | where status == "cancelled"
+    | summarize CancelCount = count() by rider_id
+}
+
+fn_rider_cancellations_1h()
+| where CancelCount > 2
+| order by CancelCount desc
+| join external_table('rider') on rider_id
+| project name, CancelCount
+| render barchart
+
+
+// ------------------------------------------------------------
+// 3. FRAUD — Same driver-rider pair repeating too often (>5/day)
+// ------------------------------------------------------------
+.create-or-alter function fn_repeat_pairs_24h() {
+    mv_latest_trip_state
+    | where requested_at > ago(1d)
+    | where isnotempty(driver_id)
+    | summarize PairCount = count() by driver_id, rider_id
+}
+
+fn_repeat_pairs_24h()
+| where PairCount > 5
+| order by PairCount desc
+| join external_table('driver') on driver_id
+| join external_table('rider') on rider_id
+| project DriverName = name1, RiderName = name, PairCount
+| render table
+
+
+// ------------------------------------------------------------
+// 4. FRAUD — Drivers ranked by speed (distance / trip time)
+//    No time window needed — completed trips only, always current.
+// ------------------------------------------------------------
+mv_latest_trip_state
+| where status == "completed"
+| extend TripMinutes = datetime_diff('second', completed_at, started_at) / 60.0
+| where TripMinutes > 0
+| extend SpeedKmph = distance_km / (TripMinutes / 60.0)
+| top 20 by SpeedKmph desc
+| join external_table('driver') on driver_id
+| project name, SpeedKmph
+| order by SpeedKmph desc
+| render barchart
+
+
+// ------------------------------------------------------------
+// 5. SURGE — Demand vs Supply, last 15 min (sliding)
+//    Demand = current trips with latest status == "requested"
+//    Supply = drivers currently in a trip (status == "in_progress")
+// ------------------------------------------------------------
+.create-or-alter function fn_surge_window_15m() {
+    mv_latest_trip_state
+    | where requested_at > ago(15m)
+}
+
+let latest_window = fn_surge_window_15m();
+let demand = latest_window
+    | where status == "requested"
+    | summarize DemandCount = count();
+let busy_drivers = latest_window
+    | where status == "in_progress"
+    | summarize BusyDrivers = dcount(driver_id);
+demand
+| extend BusyDrivers = toscalar(busy_drivers)
+| extend SurgeRatio = DemandCount * 1.0 / max_of(BusyDrivers, 1)
+| extend SurgeMultiplier = case(
+    SurgeRatio > 3, 2.0,
+    SurgeRatio > 2, 1.5,
+    SurgeRatio > 1.2, 1.2,
+    1.0
+)
+
+// ------------------------------------------------------------
+// 6. SURGE — Cancellation rate (not getting a driver), last 15 min
+// ------------------------------------------------------------
+fn_surge_window_15m()
+| summarize Total = count(), Cancelled = countif(status == "cancelled")
+| extend CancelRate = round(Cancelled * 1.0 / Total, 2)
+// render as: stat card
+
+
+// ------------------------------------------------------------
+// 7. LIVE KPIs — for Power BI / RTD stat-card tiles
+// ------------------------------------------------------------
+
+// 7a. Active trips right now (in_progress) — no time window;
+//     a trip can be "active" regardless of when it was requested.
+mv_latest_trip_state
+| where status == "in_progress"
+| count
+
+// 7b. Requests in last 5 min (rolling demand)
+mv_latest_trip_state
+| where requested_at > ago(5m)
+| where status == "requested"
+| count
+
+// 7c. Completed trips in last 1 hour
+mv_latest_trip_state
+| where requested_at > ago(1h)
+| where status == "completed"
+| count
+
+// 7d. Average fare, completed trips, last 1 hour
+mv_latest_trip_state
+| where requested_at > ago(1h)
+| where status == "completed"
+| summarize AvgFare = round(avg(fare_to_rider), 2)
+
+// 7e. Current surge multiplier — reuse query #5's tile, don't duplicate.
