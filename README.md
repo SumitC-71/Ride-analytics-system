@@ -1,11 +1,11 @@
 # RideX — Real-Time Ride Analytics Platform
 
 A proof-of-concept data engineering platform that simulates a ride-hailing
-system (Uber/Ola-style) for **Ahmedabad, India**, and builds a complete
+system (Uber/Ola-style), and builds a complete
 batch + real-time analytics pipeline on top of it — from synthetic data
 generation through to Power BI dashboards.
 
-This is a portfolio/POC project demonstrating end-to-end data engineering
+This is a POC project demonstrating end-to-end data engineering
 across simulation, operational storage, batch ETL (medallion architecture),
 real-time streaming, fraud/surge detection, and BI reporting.
 
@@ -13,8 +13,7 @@ real-time streaming, fraud/surge detection, and BI reporting.
 
 ## Architecture
 
-![Architecture Diagram](./Architecture/architecture.png)
-*(see `/Architecture` for the full diagram and design notes)*
+![Architecture Diagram](./Architecture/architecture3.png)
 
 The platform follows two parallel paths from the same source events:
 
@@ -23,7 +22,7 @@ The platform follows two parallel paths from the same source events:
   → Gold medallion layers) → Power BI (DirectQuery)
 - **Hot path (real-time):** Python simulator → Fabric Eventstream (Custom
   App endpoint) → Eventhouse (KQL Database) → live KQL queries & alerts →
-  Power BI live tiles
+  Real time Dashboards
 
 Both paths originate from the same simulated trip lifecycle, so the same
 events feed historical analytics and live operational monitoring.
