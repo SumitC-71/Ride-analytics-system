@@ -13,7 +13,7 @@ real-time streaming, fraud/surge detection, and BI reporting.
 
 ## Architecture
 
-![Architecture Diagram](./Architecture/architecture3.png)
+![Architecture Diagram](./Architecture/architecture4.png)
 
 The platform follows two parallel paths from the same source events:
 
