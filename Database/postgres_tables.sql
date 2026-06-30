@@ -84,7 +84,3 @@ CREATE TABLE ratings (
   comment     TEXT,
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
-
-
-------------- Backup -> pg_dump
-------------- Migrations -> Use Alembic (Python) or Flyway to track schema changes — so moving to Azure later is one command
